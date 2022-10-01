@@ -32,6 +32,7 @@ func (b *Bot) NewChatChan(chatid int64) {
 func (c ChatChan) Read() *message.Message {
 	var (
 		imageURLs []string
+		videoURLs []string
 		replyid   int64
 	)
 	msg := <-c.tempChan
@@ -52,12 +53,12 @@ func (c ChatChan) Read() *message.Message {
 		}
 	}
 
-	//if msg.Video != nil {
-	//	if imageURL, err := c.bot.GetFileDirectURL(msg.Video.FileID); err == nil {
-	//		// video will appear as video/mp4 here
-	//		logger.Infof("video %s %s", msg.Video.MimeType, imageURL)
-	//	}
-	//}
+	if msg.Video != nil {
+		if videoURL, err := c.bot.GetFileDirectURL(msg.Video.FileID); err == nil {
+			// video will appear as video/mp4 here
+			videoURLs = append(videoURLs, videoURL)
+		}
+	}
 
 	if msg.Document != nil {
 		if docURL, err := c.bot.GetFileDirectURL(msg.Document.FileID); err == nil {
@@ -77,6 +78,7 @@ func (c ChatChan) Read() *message.Message {
 	return &message.Message{
 		Sender:    msg.From.FirstName,
 		ImageURLs: imageURLs,
+		VideoURLs: videoURLs,
 		ReplyID:   replyid,
 		ID:        int64(msg.MessageID),
 		Text:      text,
@@ -98,6 +100,7 @@ func (c ChatChan) Write(msg *message.Message) {
 
 	var cacheFile []string
 	if msg.ImageURLs != nil {
+		// images and dynamic images forward
 		var photos []interface{}
 		for i, url := range msg.ImageURLs {
 			// url \n name
@@ -139,10 +142,7 @@ func (c ChatChan) Write(msg *message.Message) {
 
 				// transcode for mp4
 				outf := filepath.Join("gif", fmt.Sprintf("%s.mp4", name))
-				if e, _ := utils.FileExist(outf); e {
-					os.Remove(outf)
-				}
-				err = ffmpeg.Input(inf).Output(outf).WithTimeout(time.Minute * 5).Run()
+				err = ffmpeg.Input(inf).Output(outf, ffmpeg.KwArgs{"y": ""}).WithTimeout(time.Minute * 5).Run()
 				os.Remove(inf)
 				if err != nil {
 					logger.WithError(err).Errorln("Ffmpeg transcode to mp4 failed")
@@ -176,7 +176,63 @@ func (c ChatChan) Write(msg *message.Message) {
 			mediaGroupMsg.ReplyToMessageID = replyTgID
 		}
 		sendingMsg = mediaGroupMsg
+	} else if msg.VideoURLs != nil {
+		// video forward
+		var videos []interface{}
+		var err error
+		if e, _ := utils.FileExist("video"); !e {
+			err = os.Mkdir("video", 0o755)
+		}
+		if err != nil {
+			logger.WithError(err).Errorln("Create video cache dir failed")
+		} else {
+			for i, url := range msg.VideoURLs {
+				// url \n name
+				su := strings.Split(url, "\n")
+				url, name := su[0], su[1]
+
+				// download video
+				outf := filepath.Join("video", name)
+				resp, err := (&http.Client{}).Get(url)
+				if err != nil {
+					logger.WithError(err).Errorln("Get video url error")
+					continue
+				}
+				if resp.StatusCode != http.StatusOK {
+					logger.WithError(err).Errorln("Get video url not ok")
+					continue
+				}
+				file, err := os.OpenFile(outf, os.O_WRONLY|os.O_CREATE, 0o644)
+				if err != nil {
+					logger.WithError(err).Errorln("Create video file error")
+					continue
+				}
+				_, err = io.Copy(file, resp.Body)
+				if err != nil {
+					logger.WithError(err).Errorln("Download video file error")
+					continue
+				}
+				err = file.Close()
+				if err != nil {
+					logger.WithError(err).Errorln("Close video file error")
+					continue
+				}
+				cacheFile = append(cacheFile, outf)
+
+				inputMediaVideo := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(outf))
+				if i == 0 {
+					inputMediaVideo.Caption = text
+				}
+				videos = append(videos, inputMediaVideo)
+			}
+			mediaGroupMsg := tgbotapi.NewMediaGroup(c.chatid, videos)
+			if replyTgID != 0 {
+				mediaGroupMsg.ReplyToMessageID = replyTgID
+			}
+			sendingMsg = mediaGroupMsg
+		}
 	} else {
+		// raw text
 		textMsg := tgbotapi.NewMessage(c.chatid, text)
 		if replyTgID != 0 {
 			textMsg.ReplyToMessageID = replyTgID

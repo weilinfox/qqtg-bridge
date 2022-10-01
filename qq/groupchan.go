@@ -38,6 +38,7 @@ func (c ChatChan) Read() *message.Message {
 	var (
 		text      string
 		imageURLS []string
+		videoURLS []string
 		replyid   int64
 	)
 	for _, element := range msg.Elements {
@@ -62,6 +63,11 @@ func (c ChatChan) Read() *message.Message {
 			} else {
 				imageURLS = append(imageURLS, fmt.Sprintf("%s\n%s", e.Url, e.ImageId))
 			}
+		case *mirai.ShortVideoElement:
+			// Name is the sender full local path, we need to send local file for tg bot api rejects QQ short video url
+			videoURLS = append(videoURLS, fmt.Sprintf("%s\n%s", c.bot.QQClient.GetShortVideoUrl(e.Uuid, e.Md5), filepath.Base(e.Name)))
+		case *mirai.GroupFileElement:
+			text += "文件上传: " + filepath.Base(e.Name) + "\n" + c.bot.QQClient.GetGroupFileUrl(c.gid, e.Path, e.Busid) + "\n"
 		case *mirai.AtElement:
 		case *mirai.ReplyElement:
 			replyid = int64(e.ReplySeq)
@@ -72,6 +78,7 @@ func (c ChatChan) Read() *message.Message {
 	return &message.Message{
 		Sender:    msg.Sender.Nickname,
 		ImageURLs: imageURLS,
+		VideoURLs: videoURLS,
 		ID:        int64(msg.Id),
 		ReplyID:   replyid,
 		Text:      text,
@@ -92,11 +99,22 @@ func (c ChatChan) Write(msg *message.Message) {
 		}
 	}
 	sm.Append(mirai.NewText(text))
+
+	// image forward
 	for _, imageURL := range msg.ImageURLs {
 		if img, err := c.uploadImg(imageURL); err == nil {
 			sm.Append(img)
 		} else {
 			logger.WithError(err).Errorln("Image forward failed.")
+		}
+	}
+
+	// video forward
+	for _, videoURL := range msg.VideoURLs {
+		if v, err := c.uploadVideo(videoURL); err == nil {
+			sm.Append(v)
+		} else {
+			logger.WithError(err).Errorln("Video forward failed.")
 		}
 	}
 
@@ -139,7 +157,7 @@ func (c ChatChan) uploadImg(url string) (mirai.IMessageElement, error) {
 			return nil, err
 		}
 		defer os.Remove(inf)
-		err = ffmpeg.Input(inf).Output(outf).WithTimeout(time.Minute * 5).Run()
+		err = ffmpeg.Input(inf).Output(outf, ffmpeg.KwArgs{"y": ""}).WithTimeout(time.Minute * 5).Run()
 		if err != nil {
 			return nil, err
 		}
@@ -151,4 +169,51 @@ func (c ChatChan) uploadImg(url string) (mirai.IMessageElement, error) {
 	}
 
 	return c.bot.UploadImage(mirai.Source{SourceType: mirai.SourceGroup, PrimaryID: c.gid}, bytes.NewReader(imgbyte))
+}
+
+func (c ChatChan) uploadVideo(url string) (*mirai.ShortVideoElement, error) {
+	resp, err := proxyClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New("http get not ok")
+	}
+
+	if e, _ := utils.FileExist("video"); !e {
+		err = os.Mkdir("video", 0o755)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	inf := filepath.Join("video", filepath.Base(url))
+	file, err := os.OpenFile(inf, os.O_WRONLY|os.O_CREATE, 0o644)
+	defer os.Remove(inf)
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.Copy(file, resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	err = file.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	outf := inf + ".jpg"
+	err = ffmpeg.Input(inf).Output(outf, ffmpeg.KwArgs{"y": "", "ss": "0", "frames:v": "1"}).WithTimeout(time.Minute * 1).Run()
+	defer os.Remove(outf)
+	if err != nil {
+		return nil, err
+	}
+
+	vfile, err := os.OpenFile(inf, os.O_RDONLY, 0o644)
+	cfile, err := os.OpenFile(outf, os.O_RDONLY, 0o644)
+	defer vfile.Close()
+	defer cfile.Close()
+
+	return c.bot.UploadShortVideo(mirai.Source{SourceType: mirai.SourceGroup, PrimaryID: c.gid}, vfile, cfile, 1)
 }

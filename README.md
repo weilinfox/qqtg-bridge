@@ -1,6 +1,6 @@
 # qqtg-bridge
 
-转发同步 qq 群和 tg 群消息，支持 tg 的 group 和 supergroup。
+转发同步 qq 群和 telegram 群消息，支持 telegram 的 group 和 supergroup。
 
 ## 特性
 
@@ -9,6 +9,8 @@
 3. 支持转发图片和文字
 4. qq 群闪照自动转换为正常照片转发至 tg
 5. tg 动态 sticker 和 qq gif 转发
+6. 单向转发 qq 群文件直链到 tg
+7. 短视频互传
 
 ## 配置
 
